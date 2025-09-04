@@ -19,6 +19,21 @@ from src.data.models import (
     CompanyFactsResponse,
 )
 
+# 导入富途API模块
+try:
+    from .futu_api import (
+        get_hk_prices,
+        get_hk_financial_metrics,
+        get_hk_market_cap,
+        get_hk_company_news,
+        get_hk_price_data,
+        _convert_hk_ticker
+    )
+    FUTU_AVAILABLE = True
+except ImportError:
+    FUTU_AVAILABLE = False
+    print("富途API模块不可用，请确保已安装futu-api依赖")
+
 # Global cache instance
 _cache = get_cache()
 
@@ -58,35 +73,67 @@ def _make_api_request(url: str, headers: dict, method: str = "GET", json_data: d
 
 
 def get_prices(ticker: str, start_date: str, end_date: str, api_key: str = None) -> list[Price]:
-    """Fetch price data from cache or API."""
-    # Create a cache key that includes all parameters to ensure exact matches
+    """从缓存或API获取价格数据（支持美股和港股）"""
+    # 检查是否为港股代码
+    if _is_hk_stock(ticker):
+        if FUTU_AVAILABLE:
+            return get_hk_prices(ticker, start_date, end_date, api_key)
+        else:
+            raise Exception("港股数据需要富途API支持，请确保已安装futu-api依赖")
+    
+    # 美股数据使用原有逻辑
+    # 创建包含所有参数的缓存键以确保精确匹配
     cache_key = f"{ticker}_{start_date}_{end_date}"
     
-    # Check cache first - simple exact match
+    # 首先检查缓存 - 简单精确匹配
     if cached_data := _cache.get_prices(cache_key):
         return [Price(**price) for price in cached_data]
 
-    # If not in cache, fetch from API
+    # 如果缓存中没有，从API获取
     headers = {}
     financial_api_key = api_key or os.environ.get("FINANCIAL_DATASETS_API_KEY")
     if financial_api_key:
         headers["X-API-KEY"] = financial_api_key
 
+    # 构建价格数据API请求URL
     url = f"https://api.financialdatasets.ai/prices/?ticker={ticker}&interval=day&interval_multiplier=1&start_date={start_date}&end_date={end_date}"
     response = _make_api_request(url, headers)
     if response.status_code != 200:
-        raise Exception(f"Error fetching data: {ticker} - {response.status_code} - {response.text}")
+        raise Exception(f"获取数据时出错: {ticker} - {response.status_code} - {response.text}")
 
-    # Parse response with Pydantic model
+    # 使用Pydantic模型解析响应
     price_response = PriceResponse(**response.json())
     prices = price_response.prices
 
     if not prices:
         return []
 
-    # Cache the results using the comprehensive cache key
+    # 使用综合缓存键缓存结果
     _cache.set_prices(cache_key, [p.model_dump() for p in prices])
     return prices
+
+
+def _is_hk_stock(ticker: str) -> bool:
+    """
+    判断是否为港股代码
+    
+    Args:
+        ticker: 股票代码
+    
+    Returns:
+        是否为港股
+    """
+    # 港股代码特征：
+    # 1. 以.HK结尾
+    # 2. 纯数字且长度为4-5位
+    # 3. 以0开头的4-5位数字
+    if ticker.endswith('.HK'):
+        return True
+    
+    if ticker.isdigit() and len(ticker) in [4, 5]:
+        return True
+    
+    return False
 
 
 def get_financial_metrics(
@@ -96,15 +143,23 @@ def get_financial_metrics(
     limit: int = 10,
     api_key: str = None,
 ) -> list[FinancialMetrics]:
-    """Fetch financial metrics from cache or API."""
-    # Create a cache key that includes all parameters to ensure exact matches
+    """从缓存或API获取财务指标数据（支持美股和港股）"""
+    # 检查是否为港股代码
+    if _is_hk_stock(ticker):
+        if FUTU_AVAILABLE:
+            return get_hk_financial_metrics(ticker, end_date, period, limit, api_key)
+        else:
+            raise Exception("港股财务数据需要富途API支持，请确保已安装futu-api依赖")
+    
+    # 美股数据使用原有逻辑
+    # 创建包含所有参数的缓存键以确保精确匹配
     cache_key = f"{ticker}_{period}_{end_date}_{limit}"
     
-    # Check cache first - simple exact match
+    # 首先检查缓存 - 简单精确匹配
     if cached_data := _cache.get_financial_metrics(cache_key):
         return [FinancialMetrics(**metric) for metric in cached_data]
 
-    # If not in cache, fetch from API
+    # 如果缓存中没有，从API获取
     headers = {}
     financial_api_key = api_key or os.environ.get("FINANCIAL_DATASETS_API_KEY")
     if financial_api_key:
@@ -113,16 +168,16 @@ def get_financial_metrics(
     url = f"https://api.financialdatasets.ai/financial-metrics/?ticker={ticker}&report_period_lte={end_date}&limit={limit}&period={period}"
     response = _make_api_request(url, headers)
     if response.status_code != 200:
-        raise Exception(f"Error fetching data: {ticker} - {response.status_code} - {response.text}")
+        raise Exception(f"获取数据时出错: {ticker} - {response.status_code} - {response.text}")
 
-    # Parse response with Pydantic model
+    # 使用Pydantic模型解析响应
     metrics_response = FinancialMetricsResponse(**response.json())
     financial_metrics = metrics_response.financial_metrics
 
     if not financial_metrics:
         return []
 
-    # Cache the results as dicts using the comprehensive cache key
+    # 使用综合缓存键将结果作为字典缓存
     _cache.set_financial_metrics(cache_key, [m.model_dump() for m in financial_metrics])
     return financial_metrics
 
@@ -135,8 +190,15 @@ def search_line_items(
     limit: int = 10,
     api_key: str = None,
 ) -> list[LineItem]:
-    """Fetch line items from API."""
-    # If not in cache or insufficient data, fetch from API
+    """从API获取财务科目数据（支持美股和港股）"""
+    # 检查是否为港股代码
+    if _is_hk_stock(ticker):
+        # 港股暂不支持财务科目搜索，返回空列表
+        print(f"港股财务科目搜索暂不支持，股票代码: {ticker}")
+        return []
+    
+    # 美股数据使用原有逻辑
+    # 如果缓存中没有或数据不足，从API获取
     headers = {}
     financial_api_key = api_key or os.environ.get("FINANCIAL_DATASETS_API_KEY")
     if financial_api_key:
@@ -153,14 +215,14 @@ def search_line_items(
     }
     response = _make_api_request(url, headers, method="POST", json_data=body)
     if response.status_code != 200:
-        raise Exception(f"Error fetching data: {ticker} - {response.status_code} - {response.text}")
+        raise Exception(f"获取数据时出错: {ticker} - {response.status_code} - {response.text}")
     data = response.json()
     response_model = LineItemResponse(**data)
     search_results = response_model.search_results
     if not search_results:
         return []
 
-    # Cache the results
+    # 缓存结果
     return search_results[:limit]
 
 
@@ -293,10 +355,18 @@ def get_market_cap(
     end_date: str,
     api_key: str = None,
 ) -> float | None:
-    """Fetch market cap from the API."""
-    # Check if end_date is today
+    """从API获取市值数据（支持美股和港股）"""
+    # 检查是否为港股代码
+    if _is_hk_stock(ticker):
+        if FUTU_AVAILABLE:
+            return get_hk_market_cap(ticker, end_date, api_key)
+        else:
+            raise Exception("港股市值数据需要富途API支持，请确保已安装futu-api依赖")
+    
+    # 美股数据使用原有逻辑
+    # 检查结束日期是否为今天
     if end_date == datetime.datetime.now().strftime("%Y-%m-%d"):
-        # Get the market cap from company facts API
+        # 从公司基本信息API获取市值
         headers = {}
         financial_api_key = api_key or os.environ.get("FINANCIAL_DATASETS_API_KEY")
         if financial_api_key:
@@ -305,13 +375,14 @@ def get_market_cap(
         url = f"https://api.financialdatasets.ai/company/facts/?ticker={ticker}"
         response = _make_api_request(url, headers)
         if response.status_code != 200:
-            print(f"Error fetching company facts: {ticker} - {response.status_code}")
+            print(f"获取公司基本信息时出错: {ticker} - {response.status_code}")
             return None
 
         data = response.json()
         response_model = CompanyFactsResponse(**data)
         return response_model.company_facts.market_cap
 
+    # 从财务指标获取市值
     financial_metrics = get_financial_metrics(ticker, end_date, api_key=api_key)
     if not financial_metrics:
         return None
